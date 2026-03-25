@@ -59,6 +59,7 @@ from langroid.language_models.client_cache import (
 from langroid.language_models.config import HFPromptFormatterConfig
 from langroid.language_models.model_info import (
     DeepSeekModel,
+    MiniMaxModel,
     OpenAI_API_ParamInfo,
 )
 from langroid.language_models.model_info import (
@@ -96,6 +97,7 @@ DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
 GLHF_BASE_URL = "https://glhf.chat/api/openai/v1"
+MINIMAX_BASE_URL = "https://api.minimax.io/v1"
 OLLAMA_API_KEY = "ollama"
 
 VLLM_API_KEY = os.environ.get("VLLM_API_KEY", DUMMY_API_KEY)
@@ -548,6 +550,7 @@ class OpenAIGPT(LanguageModel):
         self.is_cerebras = self.config.chat_model.startswith("cerebras/")
         self.is_gemini = self.is_gemini_model()
         self.is_deepseek = self.is_deepseek_model()
+        self.is_minimax = self.is_minimax_model()
         self.is_glhf = self.config.chat_model.startswith("glhf/")
         self.is_openrouter = self.config.chat_model.startswith("openrouter/")
         self.is_langdb = self.config.chat_model.startswith("langdb/")
@@ -621,6 +624,28 @@ class OpenAIGPT(LanguageModel):
                 self.api_base = DEEPSEEK_BASE_URL
                 if self.api_key == OPENAI_API_KEY:
                     self.api_key = os.getenv("DEEPSEEK_API_KEY", DUMMY_API_KEY)
+            elif self.is_minimax:
+                self.config.chat_model = self.config.chat_model.replace("minimax/", "")
+                # Honor caller-supplied base URL (e.g. regional endpoints,
+                # proxies) instead of always forcing the default.
+                openai_api_base = os.getenv("OPENAI_API_BASE")
+                explicit_api_base = (
+                    self.config.api_base
+                    if self.config.api_base and self.config.api_base != openai_api_base
+                    else None
+                )
+                self.api_base = explicit_api_base or MINIMAX_BASE_URL
+                if self.api_key == OPENAI_API_KEY:
+                    # Only overwrite with MINIMAX_API_KEY when it is actually
+                    # set, so users who intentionally put their MiniMax key in
+                    # OPENAI_API_KEY are not silently downgraded to a dummy key.
+                    minimax_key = os.getenv("MINIMAX_API_KEY", "")
+                    if minimax_key:
+                        self.api_key = minimax_key
+                # Recompute capabilities now that the prefix has been stripped
+                # and self.info() can find the model in MODEL_INFO.
+                self.supports_strict_tools = True
+                self.supports_json_schema = self.info().has_structured_output
             elif self.is_langdb:
                 self.config.chat_model = self.config.chat_model.replace("langdb/", "")
                 self.api_base = self.config.langdb_params.base_url
@@ -660,6 +685,10 @@ class OpenAIGPT(LanguageModel):
 
                 # Add Portkey-specific headers
                 self.config.headers.update(self.config.portkey_params.get_headers())
+
+            # Sanitize the API key: strip leading/trailing whitespace
+            # (including stray newlines from .env files or CI secrets).
+            self.api_key = self.api_key.strip()
 
             # Create http_client if needed - Priority order:
             # 1. http_client_factory (most flexibility, not cacheable)
@@ -823,6 +852,14 @@ class OpenAIGPT(LanguageModel):
         return (
             self.chat_model_orig in deepseek_models
             or self.chat_model_orig.startswith("deepseek/")
+        )
+
+    def is_minimax_model(self) -> bool:
+        """Are we using the MiniMax OpenAI-compatible API?"""
+        minimax_models = [e.value for e in MiniMaxModel]
+        return (
+            self.chat_model_orig in minimax_models
+            or self.chat_model_orig.startswith("minimax/")
         )
 
     def unsupported_params(self) -> List[str]:
